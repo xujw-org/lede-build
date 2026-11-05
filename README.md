@@ -100,7 +100,8 @@ https://github.com/xujw-org/lede-build/releases/download/imagebuilder-latest/SHA
 
 - 首次构建创建 tag `imagebuilder-latest` 并上传 `imagebuilder-<target>-<subtarget>.tar.xz` + `SHA256SUMS`；
 - 之后每次构建执行 `gh release upload --clobber`，只覆盖同名资源，**下载地址保持不变**；
-- 手动 dispatch、定时任务、分支 push、tag push，只要 IB 构建成功都会更新它，不再生成版本化 Release；
+- 手动 dispatch、定时任务、默认分支 push、tag push，只要 IB 构建成功都会更新它，不再生成版本化 Release；
+- 其他分支的 push 即使构建成功也不会覆盖 Release（避免 feature 分支改写公共下载地址）；
 - release job 有独立并发组 `ib-release-latest`，多次构建不会并发写同一个 Release；
 - tag 固定指向首次创建时的提交，它只是“下载桶”，最新内容以资源文件的构建时间和 `SHA256SUMS` 为准；
 - Release 资源不计入 Actions artifacts 存储：单文件 < 2 GiB、每个 Release 最多 1000 个资源、无总大小与带宽限制；但不会自动过期。
