@@ -7,9 +7,14 @@
       "profile": "generic",
       "packages": [
         "luci-app-ttyd",
-        "openssh-sftp-server"
-      ],
-      "rootfs_partsize": "2048"
+        "openssh-sftp-server",
+        "luci-app-adguardhome",
+        "luci-app-diskman",
+        "luci-app-frpc",
+        "luci-app-lucky",
+        "luci-theme-argon",
+        "luci-app-partexp"
+      ]
     }
   ]
 }
