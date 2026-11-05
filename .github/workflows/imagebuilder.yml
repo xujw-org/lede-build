@@ -1,0 +1,403 @@
+# 用 coolsnowwolf/lede 源码构建 ImageBuilder，再用它生成自定义固件。
+#
+# 分两阶段：
+#   1. imagebuilder: 编译 lede 的 ImageBuilder（按 target/subtarget 缓存，上游提交变化才重建）
+#   2. firmware:     解压上一步的 ImageBuilder，按 configs/targets.json 逐条生成固件
+#
+# 配置入口：configs/targets.json（设备、profile、附加软件包）
+
+name: lede-imagebuilder
+
+on:
+  workflow_dispatch:
+    inputs:
+      lede_repo:
+        description: "LEDE 源码仓库 (owner/repo)"
+        required: false
+        default: coolsnowwolf/lede
+      lede_ref:
+        description: "分支 / 标签 / 提交"
+        required: false
+        default: master
+  schedule:
+    # 每周一 02:00 (UTC+8) 跟随上游重建
+    - cron: "0 18 * * 0"
+  push:
+    paths:
+      - "configs/targets.json"
+      - ".github/workflows/imagebuilder.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: imagebuilder-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 修改这个值可以强制丢弃已缓存的 ImageBuilder
+  CACHE_VERSION: v1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: 解析源码与构建矩阵
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      lede_repo: ${{ steps.resolve.outputs.lede_repo }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+      ib_matrix: ${{ steps.matrix.outputs.ib_matrix }}
+      fw_matrix: ${{ steps.matrix.outputs.fw_matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析源码提交
+        id: resolve
+        env:
+          INPUT_REPO: ${{ github.event.inputs.lede_repo || 'coolsnowwolf/lede' }}
+          INPUT_REF: ${{ github.event.inputs.lede_ref || 'master' }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$INPUT_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::lede_repo 必须是 owner/repo 形式: $INPUT_REPO"
+            exit 1
+          fi
+          if [[ ! "$INPUT_REF" =~ ^[A-Za-z0-9_./-]+$ ]]; then
+            echo "::error::lede_ref 含有非法字符: $INPUT_REF"
+            exit 1
+          fi
+
+          if [[ "$INPUT_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="$INPUT_REF"
+          else
+            # 标签会有 "refs/tags/x" 与 "refs/tags/x^{}" 两行，END 取剥离后的提交
+            sha="$(git ls-remote "https://github.com/${INPUT_REPO}.git" "$INPUT_REF" | awk 'END { print $1 }')"
+          fi
+          if [[ -z "$sha" ]]; then
+            echo "::error::无法解析 ${INPUT_REPO}@${INPUT_REF}"
+            exit 1
+          fi
+
+          {
+            echo "lede_repo=$INPUT_REPO"
+            echo "lede_ref=$INPUT_REF"
+            echo "commit_sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+          echo "源码: $INPUT_REPO@$INPUT_REF -> $sha"
+
+      - name: 生成构建矩阵
+        id: matrix
+        run: |
+          set -euo pipefail
+
+          jq -e '
+            (.targets | type == "array" and length > 0) and
+            ([.targets[].name] | length == (unique | length)) and
+            all(.targets[];
+              (.name | type == "string" and length > 0) and
+              (.target | type == "string" and length > 0) and
+              (.subtarget | type == "string" and length > 0) and
+              (.profile | type == "string" and length > 0) and
+              ((.packages // []) | type == "array") and
+              all((.packages // [])[]; type == "string")
+            )
+          ' configs/targets.json > /dev/null || {
+            echo "::error::configs/targets.json 格式错误：name/target/subtarget/profile 必填且 name 不能重复"
+            exit 1
+          }
+
+          # ImageBuilder 按 target/subtarget 去重；包列表取该 target 下所有配置的并集，
+          # 保证 imagebuilder 本地仓库里存在每个配置需要的 ipk。
+          ib="$(jq -c '
+            .targets
+            | group_by([.target, .subtarget])
+            | map({
+                name: (.[0].target + "-" + .[0].subtarget),
+                target: .[0].target,
+                subtarget: .[0].subtarget,
+                profiles: ([.[].profile] | unique),
+                packages: ([.[] | (.packages // [])[] | select(startswith("-") | not)] | unique)
+              })
+          ' configs/targets.json)"
+
+          fw="$(jq -c '
+            .targets
+            | map({
+                name: .name,
+                target: .target,
+                subtarget: .subtarget,
+                ib_name: (.target + "-" + .subtarget),
+                profile: .profile,
+                packages_str: ((.packages // []) | join(" ")),
+                files: (.files // ""),
+                rootfs_partsize: ((.rootfs_partsize // "") | tostring),
+                disabled_services_str: ((.disabled_services // []) | join(" "))
+              })
+          ' configs/targets.json)"
+
+          {
+            echo "ib_matrix=$ib"
+            echo "fw_matrix=$fw"
+          } >> "$GITHUB_OUTPUT"
+          echo "ImageBuilder 任务: $ib"
+          echo "固件任务: $fw"
+
+  imagebuilder:
+    name: ImageBuilder ${{ matrix.ib.name }}
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        ib: ${{ fromJSON(needs.prepare.outputs.ib_matrix) }}
+    env:
+      IB_NAME: ${{ matrix.ib.name }}
+      IB_TARGET: ${{ matrix.ib.target }}
+      IB_SUBTARGET: ${{ matrix.ib.subtarget }}
+      IB_PROFILES: ${{ join(matrix.ib.profiles, ' ') }}
+      IB_PACKAGES: ${{ join(matrix.ib.packages, ' ') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备缓存目录
+        run: mkdir -p .cache/ib
+
+      - name: 恢复 ImageBuilder 缓存
+        uses: actions/cache@v4
+        with:
+          path: .cache/ib
+          key: ib-${{ env.CACHE_VERSION }}-${{ needs.prepare.outputs.commit_sha }}-${{ matrix.ib.target }}-${{ matrix.ib.subtarget }}-${{ hashFiles('configs/targets.json') }}
+
+      - name: 检查缓存中的 ImageBuilder
+        id: have
+        run: |
+          set -euo pipefail
+          if tar -tJf ".cache/ib/${IB_NAME}.tar.xz" > /dev/null 2>&1; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+            echo "命中缓存: .cache/ib/${IB_NAME}.tar.xz"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "缓存不可用，开始编译 ImageBuilder"
+          fi
+
+      - name: 释放磁盘空间
+        if: steps.have.outputs.ok != '1'
+        uses: jlumbroso/free-disk-space@v2.0.0
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: 清理 runner 磁盘
+        if: steps.have.outputs.ok != '1'
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /etc/mysql /etc/php
+          docker image prune -f || true
+          df -h /
+
+      - name: 安装编译依赖
+        if: steps.have.outputs.ok != '1'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib \
+            g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 \
+            libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
+            libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf \
+            python3 python3-pyelftools python3-setuptools qemu-utils rsync scons \
+            squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd \
+            zlib1g-dev
+          sudo timedatectl set-timezone Asia/Shanghai
+
+      - name: 检出 LEDE 源码
+        if: steps.have.outputs.ok != '1'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.prepare.outputs.lede_repo }}
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          path: lede
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 更新 feeds
+        if: steps.have.outputs.ok != '1'
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          # helloworld 在部分版本中是注释状态，而默认包集合包含 luci-app-ssr-plus 等
+          sed -i 's/^#src-git helloworld/src-git helloworld/' feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 写入 ImageBuilder 构建配置
+        if: steps.have.outputs.ok != '1'
+        working-directory: lede
+        run: |
+          set -euo pipefail
+
+          {
+            echo "CONFIG_TARGET_${IB_TARGET}=y"
+            echo "CONFIG_TARGET_${IB_TARGET}_${IB_SUBTARGET}=y"
+            # 同一 target 下可能有多个设备，使用多设备模式让所有 profile 的包都被编译
+            echo "CONFIG_TARGET_MULTI_PROFILE=y"
+            echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"
+            for profile in $IB_PROFILES; do
+              echo "CONFIG_TARGET_DEVICE_${IB_TARGET}_${IB_SUBTARGET}_DEVICE_${profile}=y"
+            done
+            echo "CONFIG_IB=y"
+            echo "CONFIG_IB_STANDALONE=y"
+            for pkg in $IB_PACKAGES; do
+              echo "CONFIG_PACKAGE_${pkg}=y"
+            done
+          } > .config
+
+          make defconfig
+
+          grep -q '^CONFIG_IB=y$' .config || { echo "::error::CONFIG_IB 未生效"; exit 1; }
+          grep -q '^CONFIG_IB_STANDALONE=y$' .config || { echo "::error::CONFIG_IB_STANDALONE 未生效"; exit 1; }
+          grep -q "^CONFIG_TARGET_${IB_TARGET}_${IB_SUBTARGET}=y$" .config || {
+            echo "::error::target/subtarget 选择失败: ${IB_TARGET}/${IB_SUBTARGET}"
+            exit 1
+          }
+          if grep -q '^CONFIG_TARGET_MULTI_PROFILE=y$' .config; then
+            for profile in $IB_PROFILES; do
+              grep -q "^CONFIG_TARGET_DEVICE_${IB_TARGET}_${IB_SUBTARGET}_DEVICE_${profile}=y$" .config || {
+                echo "::error::profile 不存在或无法选中: $profile"
+                exit 1
+              }
+            done
+          else
+            echo "该 target 不支持多设备模式，使用默认 profile"
+          fi
+
+      - name: 下载源码包
+        if: steps.have.outputs.ok != '1'
+        working-directory: lede
+        run: make -j"$(nproc)" download || true
+
+      - name: 编译 ImageBuilder
+        if: steps.have.outputs.ok != '1'
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: 收集 ImageBuilder
+        if: steps.have.outputs.ok != '1'
+        run: |
+          set -euo pipefail
+          tar_path="$(find lede/bin/targets -type f -name '*imagebuilder*.tar.xz' -print -quit)"
+          if [[ -z "$tar_path" ]]; then
+            echo "::error::编译完成但未找到 ImageBuilder tar.xz"
+            exit 1
+          fi
+          mkdir -p .cache/ib
+          cp -f "$tar_path" ".cache/ib/${IB_NAME}.tar.xz"
+          ls -lh ".cache/ib/${IB_NAME}.tar.xz"
+
+      - name: 上传 ImageBuilder
+        uses: actions/upload-artifact@v4
+        with:
+          name: ib-${{ matrix.ib.name }}
+          path: .cache/ib/${{ matrix.ib.name }}.tar.xz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  firmware:
+    name: 固件 ${{ matrix.fw.name }}
+    needs: [prepare, imagebuilder]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        fw: ${{ fromJSON(needs.prepare.outputs.fw_matrix) }}
+    env:
+      FW_NAME: ${{ matrix.fw.name }}
+      FW_PROFILE: ${{ matrix.fw.profile }}
+      FW_PACKAGES: ${{ matrix.fw.packages_str }}
+      FW_FILES: ${{ matrix.fw.files }}
+      FW_ROOTFS_PARTSIZE: ${{ matrix.fw.rootfs_partsize }}
+      FW_DISABLED_SERVICES: ${{ matrix.fw.disabled_services_str }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 ImageBuilder
+        uses: actions/download-artifact@v4
+        with:
+          name: ib-${{ matrix.fw.ib_name }}
+          path: ib
+
+      - name: 安装 ImageBuilder 运行依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cpio file gawk gettext libncurses5-dev libssl-dev python3 \
+            rsync unzip wget xxd zlib1g-dev
+
+      - name: 解压 ImageBuilder
+        run: |
+          set -euo pipefail
+          mkdir -p ib-root
+          tar -xJf ib/*.tar.xz -C ib-root
+          find ib-root -maxdepth 1 -mindepth 1 -type d
+
+      - name: 生成固件
+        run: |
+          set -euo pipefail
+
+          mapfile -t ib_dirs < <(find ib-root -mindepth 1 -maxdepth 1 -type d)
+          if [[ "${#ib_dirs[@]}" -ne 1 ]]; then
+            echo "::error::ImageBuilder 解压后应只有一个顶层目录"
+            exit 1
+          fi
+          ib_dir="${ib_dirs[0]}"
+          out_dir="$GITHUB_WORKSPACE/out/$FW_NAME"
+          mkdir -p "$out_dir"
+
+          args=(image "PROFILE=$FW_PROFILE" "BIN_DIR=$out_dir")
+          [[ -n "$FW_PACKAGES" ]] && args+=("PACKAGES=$FW_PACKAGES")
+          [[ -n "$FW_ROOTFS_PARTSIZE" ]] && args+=("ROOTFS_PARTSIZE=$FW_ROOTFS_PARTSIZE")
+          [[ -n "$FW_DISABLED_SERVICES" ]] && args+=("DISABLED_SERVICES=$FW_DISABLED_SERVICES")
+          if [[ -n "$FW_FILES" && -d "$GITHUB_WORKSPACE/$FW_FILES" ]]; then
+            args+=("FILES=$GITHUB_WORKSPACE/$FW_FILES")
+          elif [[ -n "$FW_FILES" ]]; then
+            echo "::warning::files 目录不存在，忽略: $FW_FILES"
+          fi
+
+          make -C "$ib_dir" "${args[@]}"
+
+          file_count="$(find "$out_dir" -type f ! -name 'sha256sums' | wc -l)"
+          if [[ "$file_count" -eq 0 ]]; then
+            echo "::error::没有生成任何固件文件"
+            exit 1
+          fi
+          find "$out_dir" -type f -printf '%10s  %p\n' | sort -k2
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.fw.name }}
+          path: out/${{ matrix.fw.name }}/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

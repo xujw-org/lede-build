@@ -1,0 +1,15 @@
+{
+  "targets": [
+    {
+      "name": "x86-64-generic",
+      "target": "x86",
+      "subtarget": "64",
+      "profile": "generic",
+      "packages": [
+        "luci-app-ttyd",
+        "openssh-sftp-server"
+      ],
+      "rootfs_partsize": "2048"
+    }
+  ]
+}
