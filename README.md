@@ -9,14 +9,14 @@ flowchart LR
   A[configs/targets.json] --> B[prepare<br/>解析提交 / 生成矩阵]
   B --> C[imagebuilder<br/>编译 + 缓存]
   C --> D[artifact ib-*<br/>保留 3 天]
-  C -->|push tag| E[GitHub Release<br/>imagebuilder-*.tar.xz]
+  C --> E[Release imagebuilder-latest<br/>每次构建覆盖]
 ```
 
 ## 文件结构
 
 | 路径 | 作用 |
 | --- | --- |
-| `.github/workflows/imagebuilder.yml` | 全部工作流：解析 → 编译 ImageBuilder → 按需发布 Release |
+| `.github/workflows/imagebuilder.yml` | 全部工作流：解析 → 编译 ImageBuilder → 更新固定 Release |
 | `configs/targets.json` | 要构建哪些 target/subtarget、设备 profile、预编译哪些包 |
 
 ## 快速开始
@@ -26,16 +26,16 @@ flowchart LR
 3. 打开仓库 **Actions → lede-imagebuilder → Run workflow**（或 push 配置 / 打 tag）。
 4. 获取 ImageBuilder：
    - Actions 运行页底部 artifact `ib-<target>-<subtarget>`（保留 3 天）；
-   - **push tag** 会在 Releases 里生成永久下载：`imagebuilder-<target>-<subtarget>.tar.xz` + `SHA256SUMS`。
+   - 每次成功构建还会更新 Release `imagebuilder-latest`，固定下载地址永久可用。
 
 触发方式：
 
 | 触发 | 条件 |
 | --- | --- |
-| `workflow_dispatch` | 手动，可选 `lede_repo`、`lede_ref`；不发布 Release |
+| `workflow_dispatch` | 手动，可选 `lede_repo`、`lede_ref` |
 | `schedule` | 每周一 02:00 (UTC+8) 跟随上游重建 |
 | `push`（分支） | 修改 `configs/targets.json` 或本工作流时 |
-| `push`（tag） | push 任意 tag：构建并把 ImageBuilder 发布到 Release（tag 推送不评估 `paths`） |
+| `push`（tag） | 同分支推送一样构建；Release 仍是 `imagebuilder-latest`（tag 推送不评估 `paths`） |
 
 ## 配置 targets.json
 
@@ -87,28 +87,25 @@ flowchart LR
 
 > `profile` 写错会在 IB 构建阶段被断言拦下（`profile 不存在或无法选中`），不会产出错误目标。
 
-## 发布 ImageBuilder Release（打 tag）
+## ImageBuilder Release（固定下载地址）
 
-```sh
-git tag v2026.11.05
-git push origin v2026.11.05
-```
+每次 `imagebuilder` 成功都会更新**同一个** Release：`imagebuilder-latest`。
 
-Release 资源：
+固定下载地址（target/subtarget 换成你的配置）：
 
 ```
-imagebuilder-x86-64.tar.xz
-imagebuilder-<target>-<subtarget>.tar.xz
-SHA256SUMS
+https://github.com/xujw-org/lede-build/releases/download/imagebuilder-latest/imagebuilder-x86-64.tar.xz
+https://github.com/xujw-org/lede-build/releases/download/imagebuilder-latest/SHA256SUMS
 ```
 
-- 触发规则是 `push.tags: ["**"]`；GitHub 对 tag 推送**不评估** `paths` 过滤。
-- `release` job 只依赖 `imagebuilder`，IB 编译成功即发布，不存在固件阶段。
-- 每个 `ib-*` artifact 会被重命名为 `imagebuilder-<target>-<subtarget>.tar.xz`，并生成 `SHA256SUMS`。
-- Release 已存在时执行 `gh release upload --clobber`，只覆盖同名资源，不删除旧资源。
-- Release 资源不计入 Actions artifacts 存储：单文件 < 2 GiB、每个 Release 最多 1000 个资源、无总大小与带宽限制；但不会自动过期，需要手动清理旧 tag/Release。
+- 首次构建创建 tag `imagebuilder-latest` 并上传 `imagebuilder-<target>-<subtarget>.tar.xz` + `SHA256SUMS`；
+- 之后每次构建执行 `gh release upload --clobber`，只覆盖同名资源，**下载地址保持不变**；
+- 手动 dispatch、定时任务、分支 push、tag push，只要 IB 构建成功都会更新它，不再生成版本化 Release；
+- release job 有独立并发组 `ib-release-latest`，多次构建不会并发写同一个 Release；
+- tag 固定指向首次创建时的提交，它只是“下载桶”，最新内容以资源文件的构建时间和 `SHA256SUMS` 为准；
+- Release 资源不计入 Actions artifacts 存储：单文件 < 2 GiB、每个 Release 最多 1000 个资源、无总大小与带宽限制；但不会自动过期。
 
-> 想要“每次构建都更新同一个下载地址”而不是打 tag，可把 `TAG` 改成固定的 `imagebuilder-latest`，在每次成功构建后 `gh release upload --clobber`。
+要改固定名称，改工作流 `release` job 里的 `TAG: imagebuilder-latest`。
 
 ## 缓存与强制重建
 
