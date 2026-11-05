@@ -187,7 +187,7 @@ Actions → lede-firmware → Run workflow（可指定 ib_tag，默认 imagebuil
 
 上游 `include/target.mk` / `target/linux/x86/Makefile` 的 `DEFAULT_PACKAGES` 里有一些已经删除或无法编译的包（当前是 `luci-app-accesscontrol`、`luci-app-turboacc`、`kmod-usb-audio`、`kmod-usb-net-rtl8152-vendor`、`kmod-sound-*`、`kmod-i40evf` 等）。它们不在 IB 的本地仓库里，直接 `make image` 会让 `opkg install` 失败。
 
-工作流会把这些包从镜像列表里过滤掉，并在日志里输出 `::warning::本地仓库缺少默认包 ...`。想要某个包，必须在构建 IB 时让它真正编译出来（加入 `configs/targets.json` 的 `packages`，且该包在 feeds 里存在）。
+工作流会把这些包从镜像列表里过滤掉，并在日志里输出 `::warning::本地仓库缺少默认包 ...`。判断依据是 IB 生成后的包索引 `packages/Packages`，`Package:` 和 `Provides:` 都算可用，所以 `libgcc`、`libustream-openssl`、`libip6tc` 这类由 `libgcc1` 等包提供的虚拟名不会被误删。想要某个包，必须在构建 IB 时让它真正编译出来（加入 `configs/targets.json` 的 `packages`，且该包在 feeds 里存在）。
 
 ## 用 ImageBuilder 在本地生成固件
 

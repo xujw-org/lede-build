@@ -157,7 +157,19 @@ jobs:
 
           # ImageBuilder 的 DEFAULT_PACKAGES 可能引用上游已删除或无法编译的包
           # （例如 luci-app-turboacc、kmod-usb-audio）。这些包不在本地仓库里，
-          # 会让 opkg install 直接失败，所以先按本地 ipk 仓库过滤掉。
+          # 会让 opkg install 直接失败，所以先按本地包索引过滤掉。
+          # 必须用索引而不是 ipk 文件名：libgcc/libustream-openssl 这类是由
+          # libgcc1 等包的 Provides: 提供的虚拟名字。
+          make -C "$ib_dir" -s package_reload > /dev/null 2>&1 || true
+          index="$ib_dir/packages/Packages"
+          if [[ ! -s "$index" ]]; then
+            echo "::error::无法生成 ImageBuilder 包索引"
+            exit 1
+          fi
+          avail="${RUNNER_TEMP:-/tmp}/available-packages.txt"
+          awk '/^Package: / { print $2 } /^Provides: / { for (i = 2; i <= NF; i++) print $i }' \
+            "$index" | sort -u > "$avail"
+
           info="$(make -C "$ib_dir" -s info)"
           defaults="$(printf '%s\n' "$info" | sed -n 's/^Default Packages: //p')"
           profile_key="${FW_PROFILE#DEVICE_}"
@@ -169,7 +181,7 @@ jobs:
           prune=()
           for pkg in $defaults $profile_defaults; do
             [[ "$pkg" == -* ]] && continue
-            if ! compgen -G "$ib_dir/packages/${pkg}_*.ipk" > /dev/null; then
+            if ! grep -qxF "$pkg" "$avail"; then
               echo "::warning::本地仓库缺少默认包 $pkg，已从镜像中移除"
               prune+=("-$pkg")
             fi
