@@ -153,9 +153,9 @@ Actions → lede-firmware → Run workflow（可指定 ib_tag，默认 imagebuil
 
 1. `gh release download` 拉取 `imagebuilder-<ib>.tar.xz` 和 `SHA256SUMS`，用 `sha256sum -c` 校验；
 2. 解压 IB；
-3. `make info` 读取默认包，与本仓库 `packages/*.ipk` 比对，**自动剔除不存在的默认包**（见下）；
+3. `make info` 读取默认包，与 IB 包索引比对（`Package:` 与 `Provides:` 都算可用），**自动剔除不存在的默认包**（见下）；
 4. `make image PROFILE=... PACKAGES=...` 生成固件；
-5. 上传 artifact `firmware-<name>`（保留 30 天）。
+5. 上传 artifact `firmware-<name>`（保留 30 天），并更新 Release `firmware-latest`。
 
 配置 `configs/firmware.json`：
 
@@ -188,6 +188,23 @@ Actions → lede-firmware → Run workflow（可指定 ib_tag，默认 imagebuil
 上游 `include/target.mk` / `target/linux/x86/Makefile` 的 `DEFAULT_PACKAGES` 里有一些已经删除或无法编译的包（当前是 `luci-app-accesscontrol`、`luci-app-turboacc`、`kmod-usb-audio`、`kmod-usb-net-rtl8152-vendor`、`kmod-sound-*`、`kmod-i40evf` 等）。它们不在 IB 的本地仓库里，直接 `make image` 会让 `opkg install` 失败。
 
 工作流会把这些包从镜像列表里过滤掉，并在日志里输出 `::warning::本地仓库缺少默认包 ...`。判断依据是 IB 生成一次的包索引（`Package:` 与 `Provides:` 都算可用），所以 `libgcc`、`libustream-openssl`、`libip6tc` 这类由 `libgcc1` 等包提供的虚拟名不会被误删；`libc`、`kernel` 由 image 构建单独安装，始终视为可用。预检生成的索引会在判断后删除，`make image` 会重新生成并签名，不会绕过签名检查。想要某个包，必须在构建 IB 时让它真正编译出来（加入 `configs/targets.json` 的 `packages`，且该包在 feeds 里存在）。
+
+## 固件 Release（固定下载地址）
+
+每次 `build` 成功后更新同一个 Release `firmware-latest`：
+
+```
+https://github.com/xujw-org/lede-build/releases/download/firmware-latest/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
+https://github.com/xujw-org/lede-build/releases/download/firmware-latest/SHA256SUMS
+```
+
+- 下载全部 `firmware-*` artifact 后拉平；同名文件（不同配置的镜像/manifest）自动加 `<配置名>_` 前缀，`sha256sums` 跳过并统一生成 `SHA256SUMS`；
+- Release 已存在时 `gh release upload --clobber`，只覆盖同名资源，下载地址不变；
+- 只有默认分支或 tag 的构建会更新它，feature 分支不会覆盖公共地址；
+- release job 有独立并发组 `fw-release-latest`；
+- artifact 仍保留 30 天，Release 资源永久保留（需要手动清理）。
+
+要改固定名称，改 `firmware.yml` 里 `release` job 的 `TAG: firmware-latest`。
 
 ## 用 ImageBuilder 在本地生成固件
 

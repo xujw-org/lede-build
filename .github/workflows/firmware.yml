@@ -226,3 +226,75 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+  release:
+    name: 更新固件 Release
+    needs: [build]
+    # 只允许默认分支或 tag 的构建覆盖公共 Release
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    concurrency:
+      group: fw-release-latest
+      cancel-in-progress: false
+    env:
+      TAG: firmware-latest
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: 下载全部固件产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: firmware-*
+          path: release
+
+      - name: 整理发布文件
+        run: |
+          set -euo pipefail
+
+          rm -rf assets
+          mkdir -p assets
+
+          # 每个配置一个子目录；同名文件用配置名加前缀，避免 Release 资源重名。
+          # sha256sums 是每个配置各自的，跳过，统一重新生成。
+          for dir in release/*/; do
+            [[ -d "$dir" ]] || continue
+            config="$(basename "$dir")"
+            config="${config#firmware-}"
+            for f in "$dir"*; do
+              [[ -f "$f" ]] || continue
+              base="$(basename "$f")"
+              case "$base" in
+                sha256sums) continue ;;
+              esac
+              dest="assets/$base"
+              if [[ -e "$dest" ]]; then
+                dest="assets/${config}_${base}"
+              fi
+              cp -f "$f" "$dest"
+            done
+          done
+
+          if [[ -z "$(find assets -type f -print -quit)" ]]; then
+            echo "::error::没有可发布的固件文件"
+            exit 1
+          fi
+
+          (cd assets && sha256sum -- * > SHA256SUMS)
+          ls -lh assets
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber
+          else
+            gh release create "$TAG" assets/* \
+              --title "LEDE Firmware (latest)" \
+              --notes "每次成功构建自动覆盖此 Release 的资源文件，下载地址固定。"
+          fi
+          gh release view "$TAG" --json url -q .url
