@@ -1,6 +1,6 @@
 # LEDE ImageBuilder Action
 
-用 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede) 源码构建 **ImageBuilder**，再用它按需生成固件 —— 全部在 GitHub Actions 中完成。
+用 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede) 源码构建 **ImageBuilder**，再用它按需生成固件。
 
 lede 不发布官方 ImageBuilder（[releases](https://github.com/coolsnowwolf/lede/releases) 里只有少量整机固件），所以工作流分两阶段：先编译 ImageBuilder，再反复复用它出固件。第一阶段按上游提交 + 配置做缓存，只有 lede 更新或 `configs/targets.json` 变化时才重新编译。
 
