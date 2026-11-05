@@ -30,6 +30,7 @@ on:
     tags: ["**"]
     paths:
       - "configs/targets.json"
+      - "configs/feeds.conf"
       - ".github/workflows/imagebuilder.yml"
 
 permissions:
@@ -152,6 +153,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: 计算第三方源标记
+        id: feeds
+        run: |
+          set -euo pipefail
+          active="$(grep -Ev '^[[:space:]]*(#|$)' configs/feeds.conf || true)"
+          suffix=""
+          if [[ -n "$active" ]]; then
+            suffix="-feeds-$(printf '%s\n' "$active" | sha256sum | cut -c1-16)"
+            echo "启用第三方 feeds:"
+            printf '%s\n' "$active"
+          fi
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+
       - name: 准备缓存目录
         run: mkdir -p .cache/ib
 
@@ -159,7 +173,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .cache/ib
-          key: ib-${{ env.CACHE_VERSION }}-${{ needs.prepare.outputs.commit_sha }}-${{ matrix.ib.target }}-${{ matrix.ib.subtarget }}-${{ hashFiles('configs/targets.json') }}
+          key: ib-${{ env.CACHE_VERSION }}-${{ needs.prepare.outputs.commit_sha }}-${{ matrix.ib.target }}-${{ matrix.ib.subtarget }}-${{ hashFiles('configs/targets.json') }}${{ steps.feeds.outputs.suffix }}
 
       - name: 检查缓存中的 ImageBuilder
         id: have
@@ -228,6 +242,12 @@ jobs:
           set -euo pipefail
           # helloworld 在部分版本中是注释状态，而默认包集合包含 luci-app-ssr-plus 等
           sed -i 's/^#src-git helloworld/src-git helloworld/' feeds.conf.default
+
+          # 追加 configs/feeds.conf 里的第三方源码源（忽略注释/空行）
+          if [[ -f "$GITHUB_WORKSPACE/configs/feeds.conf" ]]; then
+            grep -Ev '^[[:space:]]*(#|$)' "$GITHUB_WORKSPACE/configs/feeds.conf" >> feeds.conf.default || true
+          fi
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 

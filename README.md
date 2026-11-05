@@ -19,6 +19,7 @@ flowchart LR
 | `.github/workflows/imagebuilder.yml` | 编译 ImageBuilder → 更新固定 Release |
 | `.github/workflows/firmware.yml` | 从 Release 下载 ImageBuilder → 生成固件 |
 | `configs/targets.json` | ImageBuilder：构建哪些 target/subtarget、设备 profile、预编译哪些包 |
+| `configs/feeds.conf` | 第三方源码 feed（追加到 lede 的 feeds.conf.default） |
 | `configs/firmware.json` | 固件：用哪个 IB、哪个 profile、装哪些包 |
 
 ## 快速开始
@@ -90,6 +91,34 @@ flowchart LR
 ```
 
 > `profile` 写错会在 IB 构建阶段被断言拦下（`profile 不存在或无法选中`），不会产出错误目标。
+
+## 添加第三方软件（源码 feed）
+
+和 `build-actions_my` 的做法一致：往 `feeds.conf.default` 里追加 `src-git`，再用包名选中。区别是 ImageBuilder 不能编译，所以**编译发生在 ImageBuilder 阶段**，一共三步：
+
+1. **加源**：在 `configs/feeds.conf` 里写有效行（注释/空行会被忽略）：
+
+```
+src-git openclash https://github.com/vernesong/OpenClash.git;master
+src-git danshui   https://github.com/281677160/openwrt-package.git;master
+```
+
+2. **让 IB 编译它**：在 `configs/targets.json` 的 `packages` 里加上包名：
+
+```json
+"packages": ["luci-app-ttyd", "openssh-sftp-server", "luci-app-openclash"]
+```
+
+3. **装进固件**：在 `configs/firmware.json` 的 `packages` 里再列一次。
+
+工作流行为：
+
+- `imagebuilder.yml` 在 `feeds update -a` 前把 `configs/feeds.conf` 的有效行追加到 `feeds.conf.default`，然后 `feeds update -a && feeds install -a`；
+- `packages` 里的包会被 `CONFIG_PACKAGE_<pkg>=y` 选中并编译进 IB 的本地 ipk 仓库；
+- `configs/feeds.conf` 的**有效内容**参与缓存键（空/全注释时不影响现有缓存），修改它会让 ImageBuilder 重新编译；
+- 第三方 feed 必须兼容 lede 的版本和内核（kmod 尤其敏感），编译失败会直接体现在 IB 构建日志里。
+
+> 单个包、又没有可用的 feed 时，也可以按同样的思路把源码目录放进 `package/` 再选中；当前工作流只支持 feed 这一种方式，需要时再加。
 
 ## ImageBuilder Release（固定下载地址）
 
