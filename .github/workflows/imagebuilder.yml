@@ -57,7 +57,7 @@ jobs:
       commit_sha: ${{ steps.resolve.outputs.commit_sha }}
       ib_matrix: ${{ steps.matrix.outputs.ib_matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 解析源码提交
         id: resolve
@@ -150,13 +150,13 @@ jobs:
       IB_PROFILES: ${{ join(matrix.ib.profiles, ' ') }}
       IB_PACKAGES: ${{ join(matrix.ib.packages, ' ') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 准备缓存目录
         run: mkdir -p .cache/ib
 
       - name: 恢复 ImageBuilder 缓存
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .cache/ib
           key: ib-${{ env.CACHE_VERSION }}-${{ needs.prepare.outputs.commit_sha }}-${{ matrix.ib.target }}-${{ matrix.ib.subtarget }}-${{ hashFiles('configs/targets.json') }}
@@ -213,7 +213,7 @@ jobs:
 
       - name: 检出 LEDE 源码
         if: steps.have.outputs.ok != '1'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ needs.prepare.outputs.lede_repo }}
           ref: ${{ needs.prepare.outputs.commit_sha }}
@@ -298,7 +298,7 @@ jobs:
           ls -lh ".cache/ib/${IB_NAME}.tar.xz"
 
       - name: 上传 ImageBuilder
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ib-${{ matrix.ib.name }}
           path: .cache/ib/${{ matrix.ib.name }}.tar.xz
@@ -324,7 +324,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: 下载 ImageBuilder 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: ib-*
           path: ib-release

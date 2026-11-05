@@ -39,7 +39,7 @@ jobs:
       ib_tag: ${{ steps.cfg.outputs.ib_tag }}
       matrix: ${{ steps.cfg.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 生成构建矩阵
         id: cfg
@@ -100,7 +100,7 @@ jobs:
       FW_ROOTFS_PARTSIZE: ${{ matrix.fw.rootfs_partsize }}
       FW_DISABLED_SERVICES: ${{ matrix.fw.disabled_services_str }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装 ImageBuilder 运行依赖
         env:
@@ -186,13 +186,18 @@ jobs:
           ')"
 
           prune=()
+          pruned=()
           for pkg in $defaults $profile_defaults; do
             [[ "$pkg" == -* ]] && continue
             if ! grep -qxF "$pkg" "$avail"; then
-              echo "::warning::本地仓库缺少默认包 $pkg，已从镜像中移除"
+              echo "removing unavailable default package: $pkg"
+              pruned+=("$pkg")
               prune+=("-$pkg")
             fi
           done
+          if [[ "${#pruned[@]}" -gt 0 ]]; then
+            echo "::notice::本地仓库缺少 ${#pruned[@]} 个默认包，已从镜像移除: ${pruned[*]}"
+          fi
 
           packages="$FW_PACKAGES"
           if [[ "${#prune[@]}" -gt 0 ]]; then
@@ -219,7 +224,7 @@ jobs:
           find "$out_dir" -type f -printf '%10s  %p\n' | sort -k2
 
       - name: 上传固件
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: firmware-${{ matrix.fw.name }}
           path: out/${{ matrix.fw.name }}/
@@ -244,7 +249,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: 下载全部固件产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: firmware-*
           path: release
