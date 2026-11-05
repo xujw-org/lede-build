@@ -109,7 +109,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cpio file gawk gettext libncurses5-dev libssl-dev python3 \
+            binutils build-essential cpio file gawk gettext libncurses5-dev libssl-dev python3 \
             rsync unzip wget xxd zlib1g-dev
 
       - name: 下载并校验 ImageBuilder
@@ -157,18 +157,21 @@ jobs:
 
           # ImageBuilder 的 DEFAULT_PACKAGES 可能引用上游已删除或无法编译的包
           # （例如 luci-app-turboacc、kmod-usb-audio）。这些包不在本地仓库里，
-          # 会让 opkg install 直接失败，所以先按本地包索引过滤掉。
-          # 必须用索引而不是 ipk 文件名：libgcc/libustream-openssl 这类是由
-          # libgcc1 等包的 Provides: 提供的虚拟名字。
-          make -C "$ib_dir" -s package_reload > /dev/null 2>&1 || true
-          index="$ib_dir/packages/Packages"
-          if [[ ! -s "$index" ]]; then
-            echo "::error::无法生成 ImageBuilder 包索引"
-            exit 1
-          fi
+          # 会让 opkg install 直接失败，所以先过滤掉。
+          # 这里直接从 ipk 的 control 元数据取 Package/Provides（libgcc 这类
+          # 虚拟名由 libgcc1 提供），且不调用 package_reload —— 那会改写
+          # packages/ 索引，让后续 make image 绕过本地签名生成，反而失败。
+          command -v ar > /dev/null || { echo "::error::缺少 ar (binutils)"; exit 1; }
           avail="${RUNNER_TEMP:-/tmp}/available-packages.txt"
-          awk '/^Package: / { print $2 } /^Provides: / { for (i = 2; i <= NF; i++) print $i }' \
-            "$index" | sort -u > "$avail"
+          {
+            for ipk in "$ib_dir"/packages/*.ipk; do
+              ar p "$ipk" control.tar.gz 2>/dev/null | tar -xzOf - ./control 2>/dev/null || true
+            done
+            # 这两个包由 image 构建单独安装（不进 index），视为可用
+            echo "Package: libc"
+            echo "Package: kernel"
+          } | sed -n -e 's/^Package: //p' -e 's/^Provides: //p' \
+            | tr ' ,' '\n' | sed '/^$/d' | sort -u > "$avail"
 
           info="$(make -C "$ib_dir" -s info)"
           defaults="$(printf '%s\n' "$info" | sed -n 's/^Default Packages: //p')"
