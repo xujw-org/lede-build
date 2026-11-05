@@ -1,0 +1,14 @@
+{
+  "images": [
+    {
+      "name": "x86-64-generic",
+      "ib": "x86-64",
+      "profile": "generic",
+      "packages": [
+        "luci-app-ttyd",
+        "openssh-sftp-server"
+      ],
+      "rootfs_partsize": "1024"
+    }
+  ]
+}

@@ -1,0 +1,209 @@
+# 用 Release 里的 ImageBuilder 构建固件。
+#
+# 依赖另一个工作流产出的 Release（默认 imagebuilder-latest）：
+#   imagebuilder-<target>-<subtarget>.tar.xz + SHA256SUMS
+#
+# 配置入口：configs/firmware.json
+
+name: lede-firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      ib_tag:
+        description: "ImageBuilder Release tag"
+        required: false
+        default: imagebuilder-latest
+  push:
+    paths:
+      - "configs/firmware.json"
+      - ".github/workflows/firmware.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: 解析固件矩阵
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      ib_tag: ${{ steps.cfg.outputs.ib_tag }}
+      matrix: ${{ steps.cfg.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 生成构建矩阵
+        id: cfg
+        env:
+          INPUT_TAG: ${{ github.event.inputs.ib_tag || 'imagebuilder-latest' }}
+        run: |
+          set -euo pipefail
+
+          jq -e '
+            (.images | type == "array" and length > 0) and
+            ([.images[].name] | length == (unique | length)) and
+            all(.images[];
+              (.name | type == "string" and length > 0) and
+              (.ib | type == "string" and length > 0) and
+              (.profile | type == "string" and length > 0) and
+              ((.packages // []) | type == "array") and
+              all((.packages // [])[]; type == "string")
+            )
+          ' configs/firmware.json > /dev/null || {
+            echo "::error::configs/firmware.json 格式错误：name/ib/profile 必填，name 不能重复"
+            exit 1
+          }
+
+          matrix="$(jq -c '
+            .images
+            | map({
+                name: .name,
+                ib: .ib,
+                profile: .profile,
+                packages_str: ((.packages // []) | join(" ")),
+                files: (.files // ""),
+                rootfs_partsize: ((.rootfs_partsize // "") | tostring),
+                disabled_services_str: ((.disabled_services // []) | join(" "))
+              })
+          ' configs/firmware.json)"
+
+          {
+            echo "ib_tag=$INPUT_TAG"
+            echo "matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+          echo "ImageBuilder tag: $INPUT_TAG"
+          echo "固件任务: $matrix"
+
+  build:
+    name: 固件 ${{ matrix.fw.name }}
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        fw: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      FW_NAME: ${{ matrix.fw.name }}
+      FW_PROFILE: ${{ matrix.fw.profile }}
+      FW_PACKAGES: ${{ matrix.fw.packages_str }}
+      FW_FILES: ${{ matrix.fw.files }}
+      FW_ROOTFS_PARTSIZE: ${{ matrix.fw.rootfs_partsize }}
+      FW_DISABLED_SERVICES: ${{ matrix.fw.disabled_services_str }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 ImageBuilder 运行依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cpio file gawk gettext libncurses5-dev libssl-dev python3 \
+            rsync unzip wget xxd zlib1g-dev
+
+      - name: 下载并校验 ImageBuilder
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IB_TAG: ${{ needs.prepare.outputs.ib_tag }}
+          ASSET: imagebuilder-${{ matrix.fw.ib }}.tar.xz
+        run: |
+          set -euo pipefail
+          mkdir -p ib
+
+          gh release download "$IB_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ASSET" \
+            --pattern "SHA256SUMS" \
+            --dir ib
+
+          line="$(awk -v a="$ASSET" '$2 == a { print; exit }' ib/SHA256SUMS)"
+          if [[ -z "$line" ]]; then
+            echo "::error::SHA256SUMS 中找不到 $ASSET"
+            exit 1
+          fi
+          (cd ib && echo "$line" | sha256sum -c -)
+          ls -lh ib
+
+      - name: 解压 ImageBuilder
+        run: |
+          set -euo pipefail
+          mkdir -p ib-root
+          tar -xJf ib/*.tar.xz -C ib-root
+          find ib-root -maxdepth 1 -mindepth 1 -type d
+
+      - name: 生成固件
+        run: |
+          set -euo pipefail
+
+          mapfile -t ib_dirs < <(find ib-root -mindepth 1 -maxdepth 1 -type d)
+          if [[ "${#ib_dirs[@]}" -ne 1 ]]; then
+            echo "::error::ImageBuilder 解压后应只有一个顶层目录"
+            exit 1
+          fi
+          ib_dir="${ib_dirs[0]}"
+          out_dir="$GITHUB_WORKSPACE/out/$FW_NAME"
+          mkdir -p "$out_dir"
+
+          # ImageBuilder 的 DEFAULT_PACKAGES 可能引用上游已删除或无法编译的包
+          # （例如 luci-app-turboacc、kmod-usb-audio）。这些包不在本地仓库里，
+          # 会让 opkg install 直接失败，所以先按本地 ipk 仓库过滤掉。
+          info="$(make -C "$ib_dir" -s info)"
+          defaults="$(printf '%s\n' "$info" | sed -n 's/^Default Packages: //p')"
+          profile_key="${FW_PROFILE#DEVICE_}"
+          profile_defaults="$(printf '%s\n' "$info" | awk -v p="${profile_key}:" '
+            $0 == p { found = 1; next }
+            found && /^    Packages:/ { sub(/^    Packages: /, ""); print; exit }
+          ')"
+
+          prune=()
+          for pkg in $defaults $profile_defaults; do
+            [[ "$pkg" == -* ]] && continue
+            if ! compgen -G "$ib_dir/packages/${pkg}_*.ipk" > /dev/null; then
+              echo "::warning::本地仓库缺少默认包 $pkg，已从镜像中移除"
+              prune+=("-$pkg")
+            fi
+          done
+
+          packages="$FW_PACKAGES"
+          if [[ "${#prune[@]}" -gt 0 ]]; then
+            packages="${packages:+$packages }${prune[*]}"
+          fi
+
+          args=(image "PROFILE=$FW_PROFILE" "BIN_DIR=$out_dir")
+          [[ -n "$packages" ]] && args+=("PACKAGES=$packages")
+          [[ -n "$FW_ROOTFS_PARTSIZE" ]] && args+=("ROOTFS_PARTSIZE=$FW_ROOTFS_PARTSIZE")
+          [[ -n "$FW_DISABLED_SERVICES" ]] && args+=("DISABLED_SERVICES=$FW_DISABLED_SERVICES")
+          if [[ -n "$FW_FILES" && -d "$GITHUB_WORKSPACE/$FW_FILES" ]]; then
+            args+=("FILES=$GITHUB_WORKSPACE/$FW_FILES")
+          elif [[ -n "$FW_FILES" ]]; then
+            echo "::warning::files 目录不存在，忽略: $FW_FILES"
+          fi
+
+          make -C "$ib_dir" "${args[@]}"
+
+          count="$(find "$out_dir" -type f ! -name 'sha256sums' | wc -l)"
+          if [[ "$count" -eq 0 ]]; then
+            echo "::error::没有生成任何固件文件"
+            exit 1
+          fi
+          find "$out_dir" -type f -printf '%10s  %p\n' | sort -k2
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.fw.name }}
+          path: out/${{ matrix.fw.name }}/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

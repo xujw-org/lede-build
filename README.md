@@ -16,8 +16,10 @@ flowchart LR
 
 | 路径 | 作用 |
 | --- | --- |
-| `.github/workflows/imagebuilder.yml` | 全部工作流：解析 → 编译 ImageBuilder → 更新固定 Release |
-| `configs/targets.json` | 要构建哪些 target/subtarget、设备 profile、预编译哪些包 |
+| `.github/workflows/imagebuilder.yml` | 编译 ImageBuilder → 更新固定 Release |
+| `.github/workflows/firmware.yml` | 从 Release 下载 ImageBuilder → 生成固件 |
+| `configs/targets.json` | ImageBuilder：构建哪些 target/subtarget、设备 profile、预编译哪些包 |
+| `configs/firmware.json` | 固件：用哪个 IB、哪个 profile、装哪些包 |
 
 ## 快速开始
 
@@ -139,6 +141,54 @@ CONFIG_PACKAGE_<pkg>=y                   # packages 并集
 
 之后执行 `make -j$(nproc)`（失败时回退 `-j1 V=s` 看真实错误），产物为 `bin/targets/**/*imagebuilder*.tar.xz`。
 
+## 用 GitHub Actions 构建固件
+
+`.github/workflows/firmware.yml` 直接复用 Release 里的 ImageBuilder，不重新编译：
+
+```
+Actions → lede-firmware → Run workflow（可指定 ib_tag，默认 imagebuilder-latest）
+```
+
+流程：
+
+1. `gh release download` 拉取 `imagebuilder-<ib>.tar.xz` 和 `SHA256SUMS`，用 `sha256sum -c` 校验；
+2. 解压 IB；
+3. `make info` 读取默认包，与本仓库 `packages/*.ipk` 比对，**自动剔除不存在的默认包**（见下）；
+4. `make image PROFILE=... PACKAGES=...` 生成固件；
+5. 上传 artifact `firmware-<name>`（保留 30 天）。
+
+配置 `configs/firmware.json`：
+
+```json
+{
+  "images": [
+    {
+      "name": "x86-64-generic",
+      "ib": "x86-64",
+      "profile": "generic",
+      "packages": ["luci-app-ttyd", "openssh-sftp-server"],
+      "rootfs_partsize": "1024"
+    }
+  ]
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 是 | 任务/产物名，唯一 |
+| `ib` | 是 | 与 Release 资产 `imagebuilder-<ib>.tar.xz` 对应，如 `x86-64` |
+| `profile` | 是 | 该 IB 支持的 profile，如 `generic` |
+| `packages` | 否 | 额外安装的包；`-pkg` 表示从默认集合移除 |
+| `files` | 否 | 覆盖文件目录（相对仓库根目录） |
+| `rootfs_partsize` | 否 | rootfs 分区 MB 数 |
+| `disabled_services` | 否 | 禁用的 init 服务数组 |
+
+### 关于“自动剔除默认包”
+
+上游 `include/target.mk` / `target/linux/x86/Makefile` 的 `DEFAULT_PACKAGES` 里有一些已经删除或无法编译的包（当前是 `luci-app-accesscontrol`、`luci-app-turboacc`、`kmod-usb-audio`、`kmod-usb-net-rtl8152-vendor`、`kmod-sound-*`、`kmod-i40evf` 等）。它们不在 IB 的本地仓库里，直接 `make image` 会让 `opkg install` 失败。
+
+工作流会把这些包从镜像列表里过滤掉，并在日志里输出 `::warning::本地仓库缺少默认包 ...`。想要某个包，必须在构建 IB 时让它真正编译出来（加入 `configs/targets.json` 的 `packages`，且该包在 feeds 里存在）。
+
 ## 用 ImageBuilder 在本地生成固件
 
 ```sh
@@ -156,7 +206,7 @@ make image \
 
 ## 注意事项
 
-- 工作流**不生成固件**；固件、分区大小、覆盖文件等都在本地 `make image` 阶段决定。
+- `imagebuilder.yml` 只构建 ImageBuilder；固件由 `firmware.yml`（或本地 `make image`）生成。
 - 首次构建（工具链、feeds、内核包）在 4 核 runner 上通常 40–90 分钟；命中缓存后只需重新打包 IB。
 - 磁盘：编译阶段需要 25 GB 以上，工作流已调用 `free-disk-space` 并清理预装 SDK。
 - ImageBuilder 与官方 OpenWrt 的包集合/内核不通用，不要混用 `downloads.openwrt.org` 的 opkg 源。
