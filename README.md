@@ -61,6 +61,8 @@ flowchart LR
 | `profile` | 是 | ImageBuilder 设备名（小写），**必须属于该 target/subtarget** |
 | `packages` | 否 | 额外预编译进 IB 本地 ipk 仓库的软件包 |
 
+> 示例配置里的 `rootfs_partsize` 属于固件阶段字段，当前工作流不再使用。它被保留是为了让 `targets.json` 的内容哈希与已有缓存一致；删掉它会触发一次 ImageBuilder 全量重建。
+
 工作流会：
 
 - 按 `target`+`subtarget` 去重，每个组合产出一个 ImageBuilder；
