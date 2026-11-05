@@ -28,13 +28,16 @@ flowchart LR
    - `ib-<target>-<subtarget>`：ImageBuilder 本体（保留 3 天，供复用/本地调试）
    - `firmware-<name>`：固件、`sha256sums`（保留 30 天）
 
+   如果这次是 **push tag** 触发的，还会自动发布一个 GitHub Release（见下文）。
+
 触发方式：
 
 | 触发 | 条件 |
 | --- | --- |
-| `workflow_dispatch` | 手动，可选 `lede_repo`、`lede_ref` |
+| `workflow_dispatch` | 手动，可选 `lede_repo`、`lede_ref`；不发布 Release |
 | `schedule` | 每周一 02:00 (UTC+8) 跟随上游重建 |
-| `push` | 修改 `configs/targets.json` 或本工作流时 |
+| `push`（分支） | 修改 `configs/targets.json` 或本工作流时 |
+| `push`（tag） | push 任意 tag：完整构建并发布 Release（tag 推送不评估 `paths`） |
 
 ## 配置 targets.json
 
@@ -120,6 +123,20 @@ ib-<CACHE_VERSION>-<lede 提交 SHA>-<target>-<subtarget>-<targets.json 哈希>
 - lede 有新提交、或 `targets.json` 改动 → 自动重建；
 - 想在不改配置的情况下强制重建：把工作流顶部的 `CACHE_VERSION`（默认 `v1`）改成 `v2`；
 - 缓存中缺少/损坏的 tar 会被检测出来并重新编译。
+
+## 发布 Release（打 tag）
+
+打 tag 会触发完整流程，并在最后把所有配置的固件发布到一个 GitHub Release：
+
+```sh
+git tag v2026.11.05
+git push origin v2026.11.05
+```
+
+- 触发规则是 `push.tags: ["**"]`；GitHub 对 tag 推送**不评估** `paths` 过滤，所以任意 tag 都会构建。
+- `release` job 下载全部 `firmware-*` artifact，拉平到一个目录；同名文件自动加 `<配置名>_` 前缀，并生成 `SHA256SUMS`。
+- Release 已存在时执行 `gh release upload --clobber`，只覆盖同名资源，不删除旧资源。
+- Release 资源不计入 Actions artifacts 存储：单文件必须 < 2 GiB、每个 Release 最多 1000 个资源、无总大小与带宽限制；但它也不会自动过期，需要手动清理旧 tag/Release。
 
 ## 构建细节
 

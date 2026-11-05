@@ -23,6 +23,9 @@ on:
     # 每周一 02:00 (UTC+8) 跟随上游重建
     - cron: "0 18 * * 0"
   push:
+    branches: ["**"]
+    # tag 推送不评估 paths 过滤；打 tag 即完整构建并发布 Release
+    tags: ["**"]
     paths:
       - "configs/targets.json"
       - ".github/workflows/imagebuilder.yml"
@@ -401,3 +404,65 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+  release:
+    name: 发布 Release ${{ github.ref_name }}
+    needs: [prepare, firmware]
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: 下载全部固件产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: firmware-*
+          path: release
+
+      - name: 整理发布文件
+        run: |
+          set -euo pipefail
+          rm -rf assets
+          mkdir -p assets
+
+          # 每个配置一个子目录；同名文件（不同配置产出的 profiles.json/sha256sums 等）
+          # 用配置名做前缀，避免 Release 资源重名。
+          for dir in release/*/; do
+            [[ -d "$dir" ]] || continue
+            config="$(basename "$dir")"
+            config="${config#firmware-}"
+            for f in "$dir"*; do
+              [[ -f "$f" ]] || continue
+              base="$(basename "$f")"
+              case "$base" in
+                profiles.json|sha256sums) continue ;;
+              esac
+              dest="assets/$base"
+              if [[ -e "$dest" ]]; then
+                dest="assets/${config}_${base}"
+              fi
+              cp -f "$f" "$dest"
+            done
+          done
+
+          if [[ -z "$(find assets -type f -print -quit)" ]]; then
+            echo "::error::没有可发布的固件文件"
+            exit 1
+          fi
+
+          (cd assets && sha256sum -- * > SHA256SUMS)
+          ls -lh assets
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber
+          else
+            gh release create "$TAG" assets/* --title "$TAG" --generate-notes
+          fi
+          gh release view "$TAG" --json url -q .url
