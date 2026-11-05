@@ -320,6 +320,8 @@ jobs:
       cancel-in-progress: false
     env:
       TAG: imagebuilder-latest
+      # gh 默认从 git remote 推断仓库；这个 job 不 checkout，必须显式指定
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: 下载 ImageBuilder 产物
         uses: actions/download-artifact@v4
