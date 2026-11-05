@@ -261,25 +261,23 @@ jobs:
           rm -rf assets
           mkdir -p assets
 
-          # 每个配置一个子目录；同名文件用配置名加前缀，避免 Release 资源重名。
-          # sha256sums 是每个配置各自的，跳过，统一重新生成。
-          for dir in release/*/; do
-            [[ -d "$dir" ]] || continue
-            config="$(basename "$dir")"
-            config="${config#firmware-}"
-            for f in "$dir"*; do
-              [[ -f "$f" ]] || continue
-              base="$(basename "$f")"
-              case "$base" in
-                sha256sums) continue ;;
-              esac
-              dest="assets/$base"
-              if [[ -e "$dest" ]]; then
-                dest="assets/${config}_${base}"
-              fi
-              cp -f "$f" "$dest"
-            done
-          done
+          # v7 的 download-artifact 在只匹配到一个 artifact 时会直接解压到 path，
+          # 多 artifact 时才有每个 artifact 的子目录；用 find 兼容两种布局。
+          # 同名文件加配置名前缀；sha256sums 跳过，统一重新生成。
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            [[ "$base" == "sha256sums" ]] && continue
+            dir="$(basename "$(dirname "$f")")"
+            config=""
+            if [[ "$dir" != "release" ]]; then
+              config="${dir#firmware-}"
+            fi
+            dest="assets/$base"
+            if [[ -e "$dest" ]]; then
+              dest="assets/${config:-dup}_${base}"
+            fi
+            cp -f "$f" "$dest"
+          done < <(find release -type f | sort)
 
           if [[ -z "$(find assets -type f -print -quit)" ]]; then
             echo "::error::没有可发布的固件文件"
