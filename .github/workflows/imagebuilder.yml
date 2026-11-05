@@ -406,19 +406,19 @@ jobs:
           compression-level: 0
 
   release:
-    name: 发布 Release ${{ github.ref_name }}
-    needs: [prepare, firmware]
+    name: 发布 ImageBuilder ${{ github.ref_name }}
+    needs: [imagebuilder]
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
-      - name: 下载全部固件产物
+      - name: 下载 ImageBuilder 产物
         uses: actions/download-artifact@v4
         with:
-          pattern: firmware-*
-          path: release
+          pattern: ib-*
+          path: ib-release
 
       - name: 整理发布文件
         run: |
@@ -426,28 +426,16 @@ jobs:
           rm -rf assets
           mkdir -p assets
 
-          # 每个配置一个子目录；同名文件（不同配置产出的 profiles.json/sha256sums 等）
-          # 用配置名做前缀，避免 Release 资源重名。
-          for dir in release/*/; do
-            [[ -d "$dir" ]] || continue
-            config="$(basename "$dir")"
-            config="${config#firmware-}"
-            for f in "$dir"*; do
-              [[ -f "$f" ]] || continue
-              base="$(basename "$f")"
-              case "$base" in
-                profiles.json|sha256sums) continue ;;
-              esac
-              dest="assets/$base"
-              if [[ -e "$dest" ]]; then
-                dest="assets/${config}_${base}"
-              fi
-              cp -f "$f" "$dest"
-            done
+          # 每个 target 一个 artifact，统一命名为 imagebuilder-<target>-<subtarget>.tar.xz
+          for f in ib-release/*/*.tar.xz; do
+            [[ -f "$f" ]] || continue
+            name="$(basename "$(dirname "$f")")"
+            name="${name#ib-}"
+            cp -f "$f" "assets/imagebuilder-${name}.tar.xz"
           done
 
           if [[ -z "$(find assets -type f -print -quit)" ]]; then
-            echo "::error::没有可发布的固件文件"
+            echo "::error::没有可发布的 ImageBuilder 文件"
             exit 1
           fi
 
