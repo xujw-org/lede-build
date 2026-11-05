@@ -1,10 +1,12 @@
-# 用 coolsnowwolf/lede 源码构建 ImageBuilder，再用它生成自定义固件。
+# 用 coolsnowwolf/lede 源码构建 ImageBuilder，并以 artifact / GitHub Release 提供下载。
+# 只编译 ImageBuilder，不生成任何固件。
 #
-# 分两阶段：
-#   1. imagebuilder: 编译 lede 的 ImageBuilder（按 target/subtarget 缓存，上游提交变化才重建）
-#   2. firmware:     解压上一步的 ImageBuilder，按 configs/targets.json 逐条生成固件
+# 阶段：
+#   1. prepare:      解析提交、生成 target 矩阵
+#   2. imagebuilder: 编译 lede 的 ImageBuilder（按 target/subtarget 缓存，上游提交变化才重建）
+#   3. release:      push tag 时把 ImageBuilder 发布到 GitHub Release
 #
-# 配置入口：configs/targets.json（设备、profile、附加软件包）
+# 配置入口：configs/targets.json（target/subtarget、设备 profile、预编译包）
 
 name: lede-imagebuilder
 
@@ -54,7 +56,6 @@ jobs:
       lede_repo: ${{ steps.resolve.outputs.lede_repo }}
       commit_sha: ${{ steps.resolve.outputs.commit_sha }}
       ib_matrix: ${{ steps.matrix.outputs.ib_matrix }}
-      fw_matrix: ${{ steps.matrix.outputs.fw_matrix }}
     steps:
       - uses: actions/checkout@v4
 
@@ -128,27 +129,10 @@ jobs:
               })
           ' configs/targets.json)"
 
-          fw="$(jq -c '
-            .targets
-            | map({
-                name: .name,
-                target: .target,
-                subtarget: .subtarget,
-                ib_name: (.target + "-" + .subtarget),
-                profile: .profile,
-                packages_str: ((.packages // []) | join(" ")),
-                files: (.files // ""),
-                rootfs_partsize: ((.rootfs_partsize // "") | tostring),
-                disabled_services_str: ((.disabled_services // []) | join(" "))
-              })
-          ' configs/targets.json)"
-
           {
             echo "ib_matrix=$ib"
-            echo "fw_matrix=$fw"
           } >> "$GITHUB_OUTPUT"
           echo "ImageBuilder 任务: $ib"
-          echo "固件任务: $fw"
 
   imagebuilder:
     name: ImageBuilder ${{ matrix.ib.name }}
@@ -320,89 +304,6 @@ jobs:
           path: .cache/ib/${{ matrix.ib.name }}.tar.xz
           if-no-files-found: error
           retention-days: 3
-          compression-level: 0
-
-  firmware:
-    name: 固件 ${{ matrix.fw.name }}
-    needs: [prepare, imagebuilder]
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        fw: ${{ fromJSON(needs.prepare.outputs.fw_matrix) }}
-    env:
-      FW_NAME: ${{ matrix.fw.name }}
-      FW_PROFILE: ${{ matrix.fw.profile }}
-      FW_PACKAGES: ${{ matrix.fw.packages_str }}
-      FW_FILES: ${{ matrix.fw.files }}
-      FW_ROOTFS_PARTSIZE: ${{ matrix.fw.rootfs_partsize }}
-      FW_DISABLED_SERVICES: ${{ matrix.fw.disabled_services_str }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 下载 ImageBuilder
-        uses: actions/download-artifact@v4
-        with:
-          name: ib-${{ matrix.fw.ib_name }}
-          path: ib
-
-      - name: 安装 ImageBuilder 运行依赖
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cpio file gawk gettext libncurses5-dev libssl-dev python3 \
-            rsync unzip wget xxd zlib1g-dev
-
-      - name: 解压 ImageBuilder
-        run: |
-          set -euo pipefail
-          mkdir -p ib-root
-          tar -xJf ib/*.tar.xz -C ib-root
-          find ib-root -maxdepth 1 -mindepth 1 -type d
-
-      - name: 生成固件
-        run: |
-          set -euo pipefail
-
-          mapfile -t ib_dirs < <(find ib-root -mindepth 1 -maxdepth 1 -type d)
-          if [[ "${#ib_dirs[@]}" -ne 1 ]]; then
-            echo "::error::ImageBuilder 解压后应只有一个顶层目录"
-            exit 1
-          fi
-          ib_dir="${ib_dirs[0]}"
-          out_dir="$GITHUB_WORKSPACE/out/$FW_NAME"
-          mkdir -p "$out_dir"
-
-          args=(image "PROFILE=$FW_PROFILE" "BIN_DIR=$out_dir")
-          [[ -n "$FW_PACKAGES" ]] && args+=("PACKAGES=$FW_PACKAGES")
-          [[ -n "$FW_ROOTFS_PARTSIZE" ]] && args+=("ROOTFS_PARTSIZE=$FW_ROOTFS_PARTSIZE")
-          [[ -n "$FW_DISABLED_SERVICES" ]] && args+=("DISABLED_SERVICES=$FW_DISABLED_SERVICES")
-          if [[ -n "$FW_FILES" && -d "$GITHUB_WORKSPACE/$FW_FILES" ]]; then
-            args+=("FILES=$GITHUB_WORKSPACE/$FW_FILES")
-          elif [[ -n "$FW_FILES" ]]; then
-            echo "::warning::files 目录不存在，忽略: $FW_FILES"
-          fi
-
-          make -C "$ib_dir" "${args[@]}"
-
-          file_count="$(find "$out_dir" -type f ! -name 'sha256sums' | wc -l)"
-          if [[ "$file_count" -eq 0 ]]; then
-            echo "::error::没有生成任何固件文件"
-            exit 1
-          fi
-          find "$out_dir" -type f -printf '%10s  %p\n' | sort -k2
-
-      - name: 上传固件
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-${{ matrix.fw.name }}
-          path: out/${{ matrix.fw.name }}/
-          if-no-files-found: error
-          retention-days: 30
           compression-level: 0
 
   release:
